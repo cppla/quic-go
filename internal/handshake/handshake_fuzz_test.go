@@ -264,6 +264,7 @@ func fuzzRunHandshake(
 		clientConf,
 		enable0RTTClient,
 		false,
+		nil,
 		&utils.RTTStats{},
 		nil,
 		utils.DefaultLogger.WithPrefix("client"),

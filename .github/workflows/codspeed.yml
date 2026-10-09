@@ -14,6 +14,7 @@ on:
 
 jobs:
   benchmarks:
+    if: github.repository == 'quic-go/quic-go'
     name: Benchmarks
     runs-on: codspeed-macro
     timeout-minutes: 180

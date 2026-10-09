@@ -498,6 +498,7 @@ var newClientConnection = func(
 		tlsConf,
 		enable0RTT,
 		s.config.ChromeParrot,
+		s.config.ChromeParrotSessionCache,
 		s.rttStats,
 		s.qlogger,
 		logger,

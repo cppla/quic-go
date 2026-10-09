@@ -1,0 +1,43 @@
+name: Fork policy
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          check-latest: true
+      - run: go version
+      - run: go mod verify
+      - name: Query original source advisories
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -mode=query -json github.com/quic-go/quic-go@v0.63.0 > "$RUNNER_TEMP/quic-upstream.json"
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -mode=query -json github.com/refraction-networking/utls@v1.8.3-0.20261006222701-ff1b50fbbe9a > "$RUNNER_TEMP/utls-upstream.json"
+          for report in "$RUNNER_TEMP/quic-upstream.json" "$RUNNER_TEMP/utls-upstream.json"; do
+            if grep -qE '^[[:space:]]*"osv"[[:space:]]*:' "$report"; then
+              echo "Upstream advisory candidates require source applicability review."
+              exit 1
+            else
+              status=$?
+              test "$status" -eq 1
+            fi
+          done
+      - name: Retain advisory evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: original-source-advisories
+          path: ${{ runner.temp }}/*-upstream.json
+          if-no-files-found: error

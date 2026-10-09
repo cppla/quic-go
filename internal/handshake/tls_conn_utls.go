@@ -13,35 +13,62 @@ import (
 
 // utlsQUICConn adapts uTLS's UQUICConn to the tlsQUICConn interface, translating
 // its QUIC event and connection-state types back into the crypto/tls
-// equivalents. uTLS is a fork of crypto/tls, so the translation is mechanical.
+// equivalents. Native session states remain opaque and are never converted.
 type utlsQUICConn struct {
-	conn *utls.UQUICConn
+	conn              utlsQUICClientConn
+	resumptionEnabled bool
 	// spec is retained because the transport parameters have to be written into
 	// the ClientHello extension rather than handed to uTLS directly; see
 	// SetTransportParameters.
 	spec *utls.ClientHelloSpec
 }
 
+// Keep the native event source separate so error and shutdown paths can be
+// tested without fabricating opaque TLS session state or corrupting a TLS peer.
+type utlsQUICClientConn interface {
+	Start(context.Context) error
+	Close() error
+	HandleData(utls.QUICEncryptionLevel, []byte) error
+	SetTransportParameters([]byte)
+	NextEvent() utls.QUICEvent
+	StoreSession(*utls.SessionState) error
+	ConnectionState() utls.ConnectionState
+}
+
 var _ tlsQUICConn = (*utlsQUICConn)(nil)
 
 // newUTLSQUICClient creates a QUIC-TLS client emitting the parroted ClientHello.
 //
-// Session resumption and 0-RTT are disabled: crypto/tls and uTLS each have their
-// own SessionState with unexported internals, so a uTLS session cannot be
-// converted into the *tls.SessionState the resumption path expects. The events
-// are turned off at the source rather than half-supported.
-func newUTLSQUICClient(tlsConf *tls.Config) (*utlsQUICConn, error) {
+// A caller-owned uTLS cache opts into resumption. The two TLS stacks have
+// incompatible session state, so native events are consumed inside the adapter.
+// 0-RTT remains disabled, including when a server issues an early-data ticket.
+func newUTLSQUICClient(tlsConf *tls.Config, cache utls.ClientSessionCache) (*utlsQUICConn, error) {
+	if tlsConf == nil {
+		return nil, errors.New("quic: nil TLS config with ChromeParrot")
+	}
 	uConf, err := utlsConfigFromStd(tlsConf)
 	if err != nil {
 		return nil, err
 	}
+	resume := cache != nil && !tlsConf.SessionTicketsDisabled
+	if resume {
+		if len(tlsConf.EncryptedClientHelloConfigList) > 0 {
+			return nil, errors.New("quic: ChromeParrot session resumption with a custom ECH ClientHello is not supported")
+		}
+		uConf.SessionTicketsDisabled = false
+		uConf.ClientSessionCache = cache
+		uConf.OmitEmptyPsk = true
+		// uTLS appends the real PSK extension after all shuffled extensions.
+		// Its empty-cache encoding is omitted, preserving the cold profile.
+		uConf.AlwaysIncludePSK = true
+	}
 	spec := chromeQUICClientHelloSpec(tlsConf.NextProtos)
 
-	conn := utls.UQUICClient(&utls.QUICConfig{TLSConfig: uConf}, utls.HelloCustom)
+	conn := utls.UQUICClient(&utls.QUICConfig{TLSConfig: uConf, EnableSessionEvents: resume}, utls.HelloCustom)
 	if err := conn.ApplyPreset(spec); err != nil {
 		return nil, fmt.Errorf("applying Chrome ClientHello spec: %w", err)
 	}
-	return &utlsQUICConn{conn: conn, spec: spec}, nil
+	return &utlsQUICConn{conn: conn, spec: spec, resumptionEnabled: resume}, nil
 }
 
 // utlsConfigFromStd converts a crypto/tls client config into the uTLS
@@ -63,7 +90,7 @@ func utlsConfigFromStd(c *tls.Config) (*utls.Config, error) {
 	}
 
 	uc := &utls.Config{
-		Rand:                  c.Rand,
+		Rand:                  c.Rand, //nolint:staticcheck // Preserve the caller's explicit legacy entropy policy in this compatibility adapter.
 		Time:                  c.Time,
 		RootCAs:               c.RootCAs,
 		NextProtos:            c.NextProtos,
@@ -74,7 +101,7 @@ func utlsConfigFromStd(c *tls.Config) (*utls.Config, error) {
 		// TLS 1.3 only, which QUIC requires regardless.
 		MinVersion: utls.VersionTLS13,
 		MaxVersion: utls.VersionTLS13,
-		// Resumption is off; see newUTLSQUICClient.
+		// Explicit native-cache opt-in is applied by newUTLSQUICClient.
 		SessionTicketsDisabled: true,
 	}
 
@@ -118,11 +145,11 @@ func signatureSchemesToStd(in []utls.SignatureScheme) []tls.SignatureScheme {
 	return out
 }
 
-func (c *utlsQUICConn) Start(ctx context.Context) error { return c.conn.Start(ctx) }
-func (c *utlsQUICConn) Close() error                    { return c.conn.Close() }
+func (c *utlsQUICConn) Start(ctx context.Context) error { return stdUTLSError(c.conn.Start(ctx)) }
+func (c *utlsQUICConn) Close() error                    { return stdUTLSError(c.conn.Close()) }
 
 func (c *utlsQUICConn) HandleData(level tls.QUICEncryptionLevel, data []byte) error {
-	return c.conn.HandleData(utlsEncryptionLevel(level), data)
+	return stdUTLSError(c.conn.HandleData(utlsEncryptionLevel(level), data))
 }
 
 // SetTransportParameters installs quic-go's marshalled transport parameters into
@@ -178,36 +205,75 @@ func splitTransportParameters(b []byte) (utls.TransportParameters, error) {
 }
 
 func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
-	ev := c.conn.NextEvent()
-	out := tls.QUICEvent{
-		Level: stdEncryptionLevel(ev.Level),
-		Data:  ev.Data,
-		Suite: ev.Suite,
+	for {
+		ev := c.conn.NextEvent()
+		if (ev.Kind == utls.QUICSetReadSecret || ev.Kind == utls.QUICSetWriteSecret || ev.Kind == utls.QUICWriteData) && ev.Level == utls.QUICEncryptionLevelEarly {
+			return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: errors.New("quic: unexpected 0-RTT event with ChromeParrot")}
+		}
+		out := tls.QUICEvent{
+			Level: stdEncryptionLevel(ev.Level),
+			Data:  ev.Data,
+			Suite: ev.Suite,
+		}
+		switch ev.Kind {
+		case utls.QUICResumeSession, utls.QUICStoreSession:
+			if !c.resumptionEnabled || ev.SessionState == nil {
+				return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: errors.New("quic: unexpected or empty ChromeParrot session event")}
+			}
+			// ResumeSession pauses TLS until the next NextEvent. Clear this before
+			// advancing so early secrets and early_data can never be produced.
+			ev.SessionState.EarlyData = false
+			if ev.Kind == utls.QUICStoreSession {
+				if err := c.conn.StoreSession(ev.SessionState); err != nil {
+					return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: stdUTLSError(err)}
+				}
+			}
+			continue
+		case utls.QUICErrorEvent:
+			err := ev.Err
+			if err == nil {
+				err = errors.New("quic: empty ChromeParrot TLS error event")
+			}
+			return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: stdUTLSError(err)}
+		case utls.QUICNoEvent:
+			out.Kind = tls.QUICNoEvent
+		case utls.QUICSetReadSecret:
+			out.Kind = tls.QUICSetReadSecret
+		case utls.QUICSetWriteSecret:
+			out.Kind = tls.QUICSetWriteSecret
+		case utls.QUICWriteData:
+			out.Kind = tls.QUICWriteData
+		case utls.QUICTransportParameters:
+			out.Kind = tls.QUICTransportParameters
+		case utls.QUICTransportParametersRequired:
+			out.Kind = tls.QUICTransportParametersRequired
+		case utls.QUICRejectedEarlyData:
+			out.Kind = tls.QUICRejectedEarlyData
+		case utls.QUICHandshakeDone:
+			out.Kind = tls.QUICHandshakeDone
+		default:
+			return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: fmt.Errorf("quic: unexpected uTLS QUIC event kind %d", ev.Kind)}
+		}
+		return out
 	}
-	switch ev.Kind {
-	case utls.QUICNoEvent:
-		out.Kind = tls.QUICNoEvent
-	case utls.QUICSetReadSecret:
-		out.Kind = tls.QUICSetReadSecret
-	case utls.QUICSetWriteSecret:
-		out.Kind = tls.QUICSetWriteSecret
-	case utls.QUICWriteData:
-		out.Kind = tls.QUICWriteData
-	case utls.QUICTransportParameters:
-		out.Kind = tls.QUICTransportParameters
-	case utls.QUICTransportParametersRequired:
-		out.Kind = tls.QUICTransportParametersRequired
-	case utls.QUICRejectedEarlyData:
-		out.Kind = tls.QUICRejectedEarlyData
-	case utls.QUICHandshakeDone:
-		out.Kind = tls.QUICHandshakeDone
-	default:
-		// QUICStoreSession and QUICResumeSession carry a *utls.SessionState that
-		// cannot be converted. They only fire when EnableSessionEvents is set,
-		// which newUTLSQUICClient never does, so reaching this is a bug.
-		panic(fmt.Sprintf("handshake BUG: unexpected uTLS QUIC event kind %d", ev.Kind))
+}
+
+// Preserve the original error chain while making its alert visible to the
+// crypto/tls-based QUIC error classifier. The alert types have distinct Go
+// identities even though they carry the same TLS alert number.
+type utlsAlertError struct {
+	err   error
+	alert tls.AlertError
+}
+
+func (e *utlsAlertError) Error() string   { return e.err.Error() }
+func (e *utlsAlertError) Unwrap() []error { return []error{e.err, e.alert} }
+
+func stdUTLSError(err error) error {
+	if alert, ok := errors.AsType[utls.AlertError](err); ok {
+		return &utlsAlertError{err: err, alert: tls.AlertError(alert)}
 	}
-	return out
+	return err
 }
 
 func (c *utlsQUICConn) SendSessionTicket(tls.QUICSessionTicketOptions) error {
@@ -215,7 +281,7 @@ func (c *utlsQUICConn) SendSessionTicket(tls.QUICSessionTicketOptions) error {
 }
 
 func (c *utlsQUICConn) StoreSession(*tls.SessionState) error {
-	return errors.New("quic: session resumption is unsupported with ChromeParrot")
+	return errors.New("quic: crypto/tls session state cannot be stored with ChromeParrot; native session events are handled internally")
 }
 
 func (c *utlsQUICConn) ConnectionState() tls.ConnectionState {
@@ -226,7 +292,7 @@ func (c *utlsQUICConn) ConnectionState() tls.ConnectionState {
 		DidResume:                   s.DidResume,
 		CipherSuite:                 s.CipherSuite,
 		NegotiatedProtocol:          s.NegotiatedProtocol,
-		NegotiatedProtocolIsMutual:  true,
+		NegotiatedProtocolIsMutual:  true, //nolint:staticcheck // Preserve the always-true crypto/tls compatibility field for existing callers.
 		ServerName:                  s.ServerName,
 		PeerCertificates:            s.PeerCertificates,
 		VerifiedChains:              s.VerifiedChains,

@@ -20,10 +20,6 @@ const (
 
 	chaosMinPingFrames = 2
 	chaosMaxPingFrames = 10
-
-	// Worst-case encoded size of a CRYPTO frame header: type byte plus a varint
-	// offset and a varint length. Used to bound per-packet capacity.
-	maxCryptoFrameHeaderLen = 8
 )
 
 // Length of the leading CRYPTO frame when a ClientHello is spread over several

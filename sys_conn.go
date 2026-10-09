@@ -56,7 +56,7 @@ func wrapConn(pc net.PacketConn, disableGSO bool) (rawConn, error) {
 	conn, ok := pc.(interface {
 		SyscallConn() (syscall.RawConn, error)
 	})
-	var supportsDF bool = true
+	supportsDF := true
 	if ok {
 		rawConn, err := conn.SyscallConn()
 		if err != nil {

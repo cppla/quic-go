@@ -84,6 +84,53 @@ func expectedCryptoFrameLen(offset protocol.ByteCount) protocol.ByteCount {
 	return f.Length(protocol.Version1)
 }
 
+func TestCryptoStreamTailPreservesLaterFlightOffset(t *testing.T) {
+	for _, appendBeforeDrain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("appendBeforeDrain=%v", appendBeforeDrain), func(t *testing.T) {
+			stream := newInitialCryptoStream(true, true)
+			// Ensure a later append could reuse the original backing array.
+			// Without capacity clipping, this overwrites the returned tail.
+			stream.writeBuf = make([]byte, 0, 64)
+			_, err := stream.Write([]byte("first-hello"))
+			require.NoError(t, err)
+			tail := stream.PopCryptoFrameTail(5)
+			require.Equal(t, protocol.ByteCount(6), tail.Offset)
+			require.Equal(t, []byte("hello"), tail.Data)
+			require.Nil(t, stream.PopCryptoFrameTail(1), "only one pending split is allowed")
+			if appendBeforeDrain {
+				_, err = stream.Write([]byte("second-hello"))
+				require.NoError(t, err)
+			}
+			first := stream.PopCryptoFrame(1000)
+			require.Equal(t, protocol.ByteCount(0), first.Offset)
+			require.Equal(t, []byte("first-"), first.Data)
+			require.Equal(t, protocol.ByteCount(11), stream.WriteOffset())
+			if !appendBeforeDrain {
+				_, err = stream.Write([]byte("second-hello"))
+				require.NoError(t, err)
+			}
+			second := stream.PopCryptoFrame(1000)
+			require.Equal(t, protocol.ByteCount(11), second.Offset)
+			require.Equal(t, []byte("second-hello"), second.Data)
+			require.Equal(t, []byte("hello"), tail.Data, "later writes must not mutate an in-flight tail")
+			require.Equal(t, protocol.ByteCount(23), stream.WriteOffset())
+			require.False(t, stream.HasData())
+		})
+	}
+	t.Run("whole-buffer-tail", func(t *testing.T) {
+		stream := newInitialCryptoStream(true, true)
+		_, err := stream.Write([]byte("first"))
+		require.NoError(t, err)
+		tail := stream.PopCryptoFrameTail(5)
+		require.Equal(t, protocol.ByteCount(0), tail.Offset)
+		require.Equal(t, protocol.ByteCount(5), stream.WriteOffset())
+		_, err = stream.Write([]byte("second"))
+		require.NoError(t, err)
+		require.Equal(t, []byte("first"), tail.Data)
+		require.Equal(t, protocol.ByteCount(5), stream.PopCryptoFrame(1000).Offset)
+	})
+}
+
 func TestCryptoStreamWrite(t *testing.T) {
 	str := newCryptoStream()
 

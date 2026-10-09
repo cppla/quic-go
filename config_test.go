@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
+
 	"github.com/apernet/quic-go/internal/protocol"
 	"github.com/apernet/quic-go/qlogwriter"
 	"github.com/apernet/quic-go/quicvarint"
@@ -141,6 +143,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T, chromeParrot bool) *Config
 			f.Set(reflect.ValueOf(true))
 		case "ChromeParrot":
 			f.Set(reflect.ValueOf(chromeParrot))
+		case "ChromeParrotSessionCache":
+			f.Set(reflect.ValueOf(utls.NewLRUClientSessionCache(4)))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}
@@ -179,6 +183,14 @@ func TestConfigClone(t *testing.T) {
 		require.NotNil(t, c2)
 		require.NotSame(t, c1, c2)
 	})
+}
+
+func TestConfigChromeParrotSessionCacheOwnership(t *testing.T) {
+	cache := utls.NewLRUClientSessionCache(4)
+	config := &Config{ChromeParrot: true, ChromeParrotSessionCache: cache}
+	require.Same(t, cache, config.Clone().ChromeParrotSessionCache)
+	require.Same(t, cache, populateConfig(config).ChromeParrotSessionCache)
+	require.Nil(t, populateConfig(&Config{ChromeParrot: true}).ChromeParrotSessionCache)
 }
 
 func TestConfigDefaultValues(t *testing.T) {

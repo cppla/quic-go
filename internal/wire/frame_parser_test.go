@@ -738,7 +738,15 @@ func TestFrameParserAllocs(t *testing.T) {
 				DataLenPresent: true,
 			})
 		}
-		require.Zero(t, testFrameParserAllocs(t, frames))
+		allocs := testFrameParserAllocs(t, frames)
+		if frameParserRaceEnabled {
+			// The race runtime intentionally drops sync.Pool entries at random.
+			// Still exercise and validate every parsed STREAM frame under race,
+			// but measure the zero-allocation contract in the ordinary build.
+			t.Logf("race-instrumented STREAM allocations: %g (pool reuse is randomized)", allocs)
+		} else {
+			require.Zero(t, allocs)
+		}
 	})
 
 	t.Run("ACK", func(t *testing.T) {

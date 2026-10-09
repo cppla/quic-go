@@ -4,6 +4,11 @@
 
 # A QUIC implementation in pure Go
 
+> This is the AutoCAR-maintained compatibility fork. See [FORK.md](FORK.md)
+> for the exact upstream baseline, minimal patch queue, module identity,
+> supported toolchain and validation boundaries. Upstream documentation below
+> is retained; it is not a statement that this fork is an official release.
+
 
 [![Documentation](https://img.shields.io/badge/docs-quic--go.net-red?style=flat)](https://quic-go.net/docs/)
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/apernet/quic-go)](https://pkg.go.dev/github.com/apernet/quic-go)
