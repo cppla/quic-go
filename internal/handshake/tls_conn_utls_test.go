@@ -415,6 +415,7 @@ func (*chromeEventSource) Start(context.Context) error                       { r
 func (*chromeEventSource) Close() error                                      { return nil }
 func (*chromeEventSource) HandleData(utls.QUICEncryptionLevel, []byte) error { return nil }
 func (*chromeEventSource) SetTransportParameters([]byte)                     {}
+
 func (*chromeEventSource) ConnectionState() utls.ConnectionState { return utls.ConnectionState{} }
 
 func (s *chromeEventSource) StoreSession(state *utls.SessionState) error {
