@@ -45,6 +45,11 @@ standalone validation. Builds require Go 1.27.2 or a reviewed successor.
   This repairs stream bookkeeping without changing the cold packet layout.
 - Keep upstream certificate verification and callback restrictions; do not
   weaken trust roots, hostname verification or TLS version requirements.
+- Synchronize active send-connection replacement during client path migration
+  with exported address accessors, remote-address updates and ConnectionState.
+  This repairs unsafe publication of the new path without caching stale
+  addresses, disabling migration or changing handshake profiles. Regression
+  tests cover gated publication and concurrent metadata access on real paths.
 
 The native cache is the fork's explicit opt-in; the incompatible standard
 `tls.Config.ClientSessionCache` is not translated. Callers should allocate a
