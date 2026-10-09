@@ -93,6 +93,10 @@ The STREAM allocation regression still parses and validates frames under race,
 but its zero-allocation assertion runs only without race instrumentation:
 Go's race runtime intentionally drops `sync.Pool` entries at random. The ACK
 allocation check and all functional assertions remain enabled in both builds.
+The inherited canceled-accept integration test uses fixed live/canceled groups,
+an application-stream send gate and bounded worker joins instead of a random
+cancellation-count threshold. It verifies complete payloads and the requested
+QUIC version on the real connection; no runtime behavior is changed.
 Go 1.27's syntax-only `embedlit` modernization is excluded from `go fix`
 to preserve the inherited source layout; all other fix checks remain enabled
 apart from the upstream performance-motivated `slicesbackward` exclusion.

@@ -8,7 +8,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,94 +321,186 @@ func testStreamCancellation(
 	assert.NotZero(t, serverErrs, "server-observed canceled streams")
 }
 
+// acceptStreamContext signals when AcceptUniStream evaluates the context arm of
+// its pending select, without depending on when the scheduler parks the goroutine.
+type acceptStreamContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *acceptStreamContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
 func TestCancelAcceptStream(t *testing.T) {
 	const numStreams = 30
 
-	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(&quic.Config{Versions: []quic.Version{version}}))
 	require.NoError(t, err)
 	defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(10*time.Second))
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
 		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{MaxIncomingUniStreams: numStreams / 3}),
+		getQuicConfig(&quic.Config{Versions: []quic.Version{version}, MaxIncomingUniStreams: numStreams / 3}),
 	)
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
 
 	serverConn, err := server.Accept(ctx)
 	require.NoError(t, err)
-	defer conn.CloseWithError(0, "")
+	defer serverConn.CloseWithError(0, "")
+	require.Equal(t, version, conn.ConnectionState().Version)
+	require.Equal(t, version, serverConn.ConnectionState().Version)
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
 
+	var workers, canceledWorkers sync.WaitGroup
+	workers.Add(2*numStreams + 1)
+	canceledWorkers.Add(numStreams)
+	allDone := make(chan struct{})
+	canceledDone := make(chan struct{})
+	startSending := make(chan struct{})
 	serverErrChan := make(chan error, 1)
-	go func() {
-		defer close(serverErrChan)
-		ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(2*time.Second))
-		defer cancel()
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for range numStreams {
-			<-ticker.C
-			str, err := serverConn.OpenUniStreamSync(ctx)
-			if err != nil {
-				serverErrChan <- err
-				return
-			}
-			if _, err := str.Write(PRData); err != nil {
-				serverErrChan <- err
-				return
-			}
-			str.Close()
+	t.Cleanup(func() {
+		cancel()
+		conn.CloseWithError(0, "")
+		serverConn.CloseWithError(0, "")
+		server.Close()
+		select {
+		case <-allDone:
+		case <-time.After(scaleDuration(5 * time.Second)):
+			t.Error("test workers did not exit after closing the connections")
 		}
+	})
+	go func() {
+		defer workers.Done()
+		serverErrChan <- func() error {
+			select {
+			case <-startSending:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			for range numStreams {
+				str, err := serverConn.OpenUniStreamSync(ctx)
+				if err != nil {
+					return err
+				}
+				if err := str.SetWriteDeadline(deadline); err != nil {
+					return err
+				}
+				if _, err := str.Write(PRData); err != nil {
+					return err
+				}
+				if err := str.Close(); err != nil {
+					return err
+				}
+			}
+			return nil
+		}()
 	}()
 
-	var numToAccept int
-	var counter atomic.Int32
-	var wg sync.WaitGroup
-	wg.Add(numStreams)
-	for numToAccept < numStreams {
-		ctx, cancel := context.WithCancel(context.Background())
-		// cancel accepting half of the streams
-		if rand.Int()%2 == 0 {
-			cancel()
-		} else {
-			numToAccept++
-			defer cancel()
-		}
-
+	type canceledResult struct {
+		stream *quic.ReceiveStream
+		err    error
+	}
+	type streamResult struct {
+		id  quic.StreamID
+		err error
+	}
+	canceledResults := make(chan canceledResult, numStreams)
+	streamResults := make(chan streamResult, numStreams)
+	pending := make([]<-chan struct{}, 0, 2*numStreams)
+	cancelAccepts := make([]context.CancelFunc, 0, numStreams)
+	for range numStreams {
+		cancelCtx, cancelAccept := context.WithCancel(ctx)
+		cancelAccepts = append(cancelAccepts, cancelAccept)
+		canceledCtx := &acceptStreamContext{Context: cancelCtx, waiting: make(chan struct{})}
+		pending = append(pending, canceledCtx.waiting)
 		go func() {
-			str, err := conn.AcceptUniStream(ctx)
+			defer workers.Done()
+			defer canceledWorkers.Done()
+			str, err := conn.AcceptUniStream(canceledCtx)
+			canceledResults <- canceledResult{stream: str, err: err}
+		}()
+
+		liveCtx := &acceptStreamContext{Context: ctx, waiting: make(chan struct{})}
+		pending = append(pending, liveCtx.waiting)
+		go func() {
+			defer workers.Done()
+			str, err := conn.AcceptUniStream(liveCtx)
 			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					counter.Add(1)
-				}
+				streamResults <- streamResult{err: err}
 				return
 			}
-			go func() {
+			streamResults <- streamResult{id: str.StreamID(), err: func() error {
+				if err := str.SetReadDeadline(deadline); err != nil {
+					return err
+				}
 				data, err := io.ReadAll(str)
 				if err != nil {
-					t.Errorf("ReadAll failed: %v", err)
-					return
+					return err
 				}
 				if !bytes.Equal(data, PRData) {
-					t.Errorf("received data mismatch")
-					return
+					return fmt.Errorf("received data mismatch on stream %d", str.StreamID())
 				}
-				wg.Done()
-			}()
+				return nil
+			}()}
 		}()
 	}
-	wg.Wait()
+	go func() {
+		canceledWorkers.Wait()
+		close(canceledDone)
+	}()
+	go func() {
+		workers.Wait()
+		close(allDone)
+	}()
 
-	count := counter.Load()
-	t.Logf("canceled AcceptStream %d times", count)
-	require.Greater(t, count, int32(numStreams/4))
-	require.NoError(t, conn.CloseWithError(0, ""))
-	require.NoError(t, server.Close())
+	waitFor := func(done <-chan struct{}, description string) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for %s: %v", description, ctx.Err())
+		}
+	}
+	// No application streams exist until all live and canceled accepts have
+	// reached their pending select, and all canceled workers have finished.
+	for _, waiting := range pending {
+		waitFor(waiting, "AcceptUniStream to reach its pending select")
+	}
+	for _, cancelAccept := range cancelAccepts {
+		cancelAccept()
+	}
+	waitFor(canceledDone, "canceled accepts to exit")
+	for range numStreams {
+		result := <-canceledResults // all canceled workers have exited
+		require.ErrorIs(t, result.err, context.Canceled)
+		require.Nil(t, result.stream)
+	}
+	close(startSending)
+
+	streamIDs := make(map[quic.StreamID]struct{}, numStreams)
+	for range numStreams {
+		select {
+		case result := <-streamResults:
+			require.NoError(t, result.err)
+			_, duplicate := streamIDs[result.id]
+			require.False(t, duplicate, "stream %d accepted twice", result.id)
+			streamIDs[result.id] = struct{}{}
+		case <-ctx.Done():
+			t.Fatalf("timed out receiving stream data: %v", ctx.Err())
+		}
+	}
+	waitFor(allDone, "all test workers to exit")
+	require.Len(t, streamIDs, numStreams)
 	require.NoError(t, <-serverErrChan)
 }
 
