@@ -25,6 +25,10 @@ type baseCryptoStream struct {
 
 	writeOffset protocol.ByteCount
 	writeBuf    []byte
+	// The first ClientHello can send its tail before its middle. These bounds
+	// retain that already-sent gap even if a later handshake flight is queued.
+	sentTailStart protocol.ByteCount
+	sentTailEnd   protocol.ByteCount
 }
 
 func newCryptoStream() *cryptoStream {
@@ -98,21 +102,34 @@ func (s *baseCryptoStream) WriteOffset() protocol.ByteCount {
 func (s *baseCryptoStream) PopCryptoFrame(maxLen protocol.ByteCount) *wire.CryptoFrame {
 	f := &wire.CryptoFrame{Offset: s.writeOffset}
 	n := min(f.MaxDataLen(maxLen), protocol.ByteCount(len(s.writeBuf)))
+	if s.sentTailEnd > 0 {
+		n = min(n, s.sentTailStart-s.writeOffset)
+	}
 	if n <= 0 {
 		return nil
 	}
 	f.Data = s.writeBuf[:n]
 	s.writeBuf = s.writeBuf[n:]
 	s.writeOffset += n
+	s.skipSentTail()
 	return f
+}
+
+func (s *baseCryptoStream) skipSentTail() {
+	if s.sentTailEnd > 0 && s.writeOffset == s.sentTailStart {
+		s.writeOffset = s.sentTailEnd
+		s.sentTailStart, s.sentTailEnd = 0, 0
+	}
 }
 
 // PopCryptoFrameTail takes dataLen bytes from the end of what is queued rather
 // than the start, so a packet can carry the last part of the ClientHello while
-// the middle is still pending. The write offset is unchanged, so later calls to
-// PopCryptoFrame continue from the front.
+// the middle is still pending. The write offset continues from the front, then
+// skips the already-sent tail before a later flight (for example HRR's second
+// ClientHello). Only one tail split may be pending at a time; the packet packer
+// uses this operation only for the first ClientHello's first packet.
 func (s *baseCryptoStream) PopCryptoFrameTail(dataLen protocol.ByteCount) *wire.CryptoFrame {
-	if dataLen <= 0 || dataLen > protocol.ByteCount(len(s.writeBuf)) {
+	if dataLen <= 0 || dataLen > protocol.ByteCount(len(s.writeBuf)) || s.sentTailEnd > 0 {
 		return nil
 	}
 	n := protocol.ByteCount(len(s.writeBuf)) - dataLen
@@ -120,7 +137,12 @@ func (s *baseCryptoStream) PopCryptoFrameTail(dataLen protocol.ByteCount) *wire.
 		Offset: s.writeOffset + n,
 		Data:   s.writeBuf[n:],
 	}
-	s.writeBuf = s.writeBuf[:n]
+	s.sentTailStart = f.Offset
+	s.sentTailEnd = f.Offset + dataLen
+	// A later Write must not overwrite the tail still owned by its frame (and
+	// possibly a retransmission queue). Force appends past the prefix to allocate.
+	s.writeBuf = s.writeBuf[:n:n]
+	s.skipSentTail()
 	return f
 }
 

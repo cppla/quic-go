@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
+
 	"github.com/apernet/quic-go/internal/protocol"
 	"github.com/apernet/quic-go/internal/qerr"
 	"github.com/apernet/quic-go/internal/utils"
@@ -68,14 +70,14 @@ var _ CryptoSetup = &cryptoSetup{}
 
 // NewCryptoSetupClient creates a new crypto setup for the client
 // chromeParrot makes the client emit Chrome's TLS ClientHello via uTLS instead of
-// crypto/tls. It forces enable0RTT off: see newUTLSQUICClient for why resumption
-// can't be carried across the two TLS stacks.
+// crypto/tls. Native uTLS sessions are optional and never enable 0-RTT.
 func NewCryptoSetupClient(
 	connID protocol.ConnectionID,
 	tp *wire.TransportParameters,
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	chromeParrot bool,
+	chromeSessionCache utls.ClientSessionCache,
 	rttStats *utils.RTTStats,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
@@ -96,7 +98,7 @@ func NewCryptoSetupClient(
 	cs.allow0RTT = enable0RTT && !chromeParrot
 
 	if chromeParrot {
-		conn, err := newUTLSQUICClient(tlsConf)
+		conn, err := newUTLSQUICClient(tlsConf, chromeSessionCache)
 		if err != nil {
 			return nil, err
 		}

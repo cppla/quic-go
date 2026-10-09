@@ -252,7 +252,7 @@ func (t *Transport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.C
 	return t.dial(ctx, addr, "", tlsConf, conf, true)
 }
 
-func (t *Transport) dial(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (*Conn, error) {
+func (t *Transport) dial(ctx context.Context, addr net.Addr, _ string, tlsConf *tls.Config, conf *Config, use0RTT bool) (*Conn, error) {
 	if err := t.init(t.isSingleUse); err != nil {
 		return nil, err
 	}

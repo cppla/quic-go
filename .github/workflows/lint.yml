@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.27.x"
+          go-version: "1.27.2"
           check-latest: true
       - name: Check for //go:build ignore in .go files
         run: |
@@ -31,8 +31,10 @@ jobs:
         run: |
           set -o pipefail
           # slices.Backward is measurably slower in receivedPacketHistory.
-          go list ./... | grep -v '/internal/ackhandler$' | xargs go fix -diff
-          go fix -diff -slicesbackward=false ./internal/ackhandler
+          # Keep inherited embedded-field literals to avoid unrelated Go 1.27
+          # syntax-only churn in the narrow compatibility patch queue.
+          go list ./... | grep -v '/internal/ackhandler$' | xargs go fix -diff -embedlit=false
+          go fix -diff -embedlit=false -slicesbackward=false ./internal/ackhandler
       - name: Run code generators
         if: success() || failure() # run this step even if the previous one failed
         run: .github/workflows/go-generate.sh
@@ -44,21 +46,17 @@ jobs:
       - name: Run gcassert
         if: success() || failure() # run this step even if the previous one failed
         run: go tool gcassert ./...
-        # Only run govulncheck on pull requests, not on pushes (including merge commits to master).
-        # govulncheck queries the vulnerability database at runtime, so a newly disclosed vulnerability
-        # could otherwise cause the post-merge run to fail even though nothing in the repository changed,
-        # breaking master through no fault of the merged PR.
       - name: Run govulncheck
-        if: ${{ (success() || failure()) && github.event_name == 'pull_request' }}
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        if: success() || failure()
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
   golangci-lint:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        go: [ "1.26.x", "1.27.x" ]
+        go: [ "1.27.2" ]
     env:
-      GOLANGCI_LINT_VERSION: v2.13.0
+      GOLANGCI_LINT_VERSION: v2.14.0
     name: golangci-lint (Go ${{ matrix.go }})
     steps:
       - uses: actions/checkout@v7

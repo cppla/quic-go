@@ -502,8 +502,8 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	ackedPackets = nil    //nolint:ineffassign // This is just to be on the safe side.
 	clear(h.ackedPackets) // make sure the memory is released
 	h.ackedPackets = h.ackedPackets[:0]
-	h.ackedPacketsInfo = nil //nolint:ineffassign // This is just to be on the safe side.
-	h.lostPacketsInfo = nil  //nolint:ineffassign // This is just to be on the safe side.
+	h.ackedPacketsInfo = nil
+	h.lostPacketsInfo = nil
 
 	// Reset the pto_count unless the client is unsure if the server has validated the client's address.
 	if h.peerCompletedAddressValidation {

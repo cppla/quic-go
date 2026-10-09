@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   Pruning:
+    if: github.repository == 'quic-go/quic-go'
     runs-on: ubuntu-latest
     steps:
     - name: Build Fuzzers

@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   batch-fuzzing:
+    if: github.repository == 'quic-go/quic-go'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -37,6 +38,7 @@ jobs:
           storage-repo-branch-coverage: gh-pages
 
   coverage:
+    if: github.repository == 'quic-go/quic-go'
     needs: batch-fuzzing
     runs-on: ubuntu-latest
     env:

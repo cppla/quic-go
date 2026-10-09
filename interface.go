@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
+
 	"github.com/apernet/quic-go/internal/handshake"
 	"github.com/apernet/quic-go/internal/protocol"
 	"github.com/apernet/quic-go/qlogwriter"
@@ -205,6 +207,15 @@ type Config struct {
 	// Client side only; it has no effect on a listener. Because it pins the
 	// values above, settings that conflict with Chrome's are ignored.
 	ChromeParrot bool
+
+	// ChromeParrotSessionCache explicitly enables TLS 1.3 session resumption
+	// for ChromeParrot clients. It stores uTLS-native sessions; crypto/tls's
+	// ClientSessionCache is not used or converted on this path. A nil cache or
+	// tls.Config.SessionTicketsDisabled keeps the full-handshake-only behavior.
+	// The caller should provide a bounded, concurrency-safe cache scoped to one
+	// client's TLS policy and profile. Config.Clone shares this cache. Listeners
+	// and clients without ChromeParrot ignore it. 0-RTT is never enabled.
+	ChromeParrotSessionCache utls.ClientSessionCache
 }
 
 // ClientInfo contains information about an incoming connection attempt.

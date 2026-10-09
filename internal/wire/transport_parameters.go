@@ -218,6 +218,11 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 				return fmt.Errorf("wrong length for reset_stream_at: %d (expected empty)", paramLen)
 			}
 			p.EnableResetStreamAt = true
+		case versionInformationParameterID, googleInitialRTTParameterID, googleConnectionOptionsParameterID:
+			// These Chrome-profile extensions are sent but not interpreted by
+			// this endpoint. Preserve the unknown-parameter policy, including
+			// rejecting unsupported parameters restored from session tickets.
+			fallthrough
 		default:
 			if fromSessionTicket {
 				// A ticket might contain a parameter for an extension supported by an older

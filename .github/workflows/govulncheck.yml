@@ -7,6 +7,7 @@ permissions: read-all
 
 jobs:
   govulncheck:
+    if: github.repository == 'quic-go/quic-go'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
