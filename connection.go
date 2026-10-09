@@ -136,6 +136,8 @@ type Conn struct {
 	version     protocol.Version
 	config      *Config
 
+	// The run loop owns conn. connStateMutex protects replacement during
+	// migration from concurrent public state and address operations.
 	conn      sendConn
 	sendQueue sender
 
@@ -220,6 +222,7 @@ type Conn struct {
 
 	datagramQueue *datagramQueue
 
+	// Also guards conn when it is accessed outside the run loop.
 	connStateMutex sync.Mutex
 	connState      ConnectionState
 
@@ -945,7 +948,9 @@ func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 		maxPacketSize = c.peerParams.MaxUDPPayloadSize
 	}
 	c.mtuDiscoverer.Reset(now, initialPacketSize, maxPacketSize)
+	c.connStateMutex.Lock()
 	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger) // TODO: find a better way
+	c.connStateMutex.Unlock()
 	c.sendQueue.Close()
 	c.sendQueue = newSendQueue(c.conn)
 	go func() {
@@ -3107,10 +3112,18 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 }
 
 // LocalAddr returns the local address of the QUIC connection.
-func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+func (c *Conn) LocalAddr() net.Addr {
+	c.connStateMutex.Lock()
+	defer c.connStateMutex.Unlock()
+	return c.conn.LocalAddr()
+}
 
 // RemoteAddr returns the remote address of the QUIC connection.
-func (c *Conn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
+func (c *Conn) RemoteAddr() net.Addr {
+	c.connStateMutex.Lock()
+	defer c.connStateMutex.Unlock()
+	return c.conn.RemoteAddr()
+}
 
 // getPathManager lazily initializes the Conn's pathManagerOutgoing.
 // May create multiple pathManagerOutgoing objects if called concurrently.
@@ -3224,6 +3237,8 @@ func (c *Conn) InitialPacketSize() congestion.ByteCount {
 
 // SetRemoteAddr Replace the current remote addr with a new one
 func (c *Conn) SetRemoteAddr(addr net.Addr) {
+	c.connStateMutex.Lock()
+	defer c.connStateMutex.Unlock()
 	c.conn.SetRemoteAddr(addr)
 }
 

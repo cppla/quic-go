@@ -18,6 +18,14 @@ import (
 )
 
 func TestConnectionMigration(t *testing.T) {
+	testConnectionMigration(t, false)
+}
+
+func TestConnectionMigrationConcurrentStateAccess(t *testing.T) {
+	testConnectionMigration(t, true)
+}
+
+func testConnectionMigration(t *testing.T, concurrentStateAccess bool) {
 	ln, err := quic.ListenAddr("localhost:0", getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer ln.Close()
@@ -104,6 +112,37 @@ func TestConnectionMigration(t *testing.T) {
 	sendAndReceiveFile(t) // stream 2
 	require.NotZero(t, packetsPath1.Load())
 	require.Zero(t, packetsPath2.Load())
+
+	if concurrentStateAccess {
+		remote := proxy.LocalAddr()
+		started := make(chan struct{})
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			readState := func() {
+				_ = conn.LocalAddr().String()
+				_ = conn.RemoteAddr().String()
+				_ = conn.ConnectionState()
+				conn.SetRemoteAddr(remote)
+			}
+			readState()
+			close(started)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					readState()
+				}
+			}
+		}()
+		<-started
+		defer func() {
+			close(stop)
+			<-done
+		}()
+	}
 
 	// probing the path causes a few packets to be sent on path 2
 	path, err := conn.AddPath(tr2)
